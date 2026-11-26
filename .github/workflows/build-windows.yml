@@ -8,68 +8,75 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Restore engine.jsx from history and patch path open
+      - name: Restore engine.jsx and apply desktop patches
         shell: bash
         run: |
           git show 680ae3e01a7458d2141026bd92d4e58d258b52dd:src/darkhorse/engine.jsx > src/darkhorse/engine.jsx
-          python - <<'PY'
-          from pathlib import Path
-          import re
-          p = Path("src/darkhorse/engine.jsx")
-          t = p.read_text(encoding="utf-8")
-          m = re.search(r"function revealLibrary\(path\) \{[\s\S]*?\n\}", t)
-          if not m:
-              raise SystemExit("revealLibrary not found")
-          new = '''async function revealLibrary(kind, folder) {
-          \tconst k = kind === "refs" ? "refs" : "cinema";
-          \tconst folderName = folder || "";
-          \ttry {
-          \t\tconst res = await fetch("/api/library?op=open", {
-          \t\t\tmethod: "POST",
-          \t\t\theaders: { "content-type": "application/json" },
-          \t\t\tbody: JSON.stringify({ kind: k, folder: folderName })
-          \t\t});
-          \t\tconst data = await res.json();
-          \t\tif (data && data.ok) {
-          \t\t\ttoast(data.path ? `Открыто: ${data.path}` : "Папка открыта");
-          \t\t\treturn;
-          \t\t}
-          \t} catch {}
-          \ttry {
-          \t\tif (typeof window !== "undefined" && window.darkHorseDesktop?.openPath) {
-          \t\t\tconst res = await fetch("/api/library?op=status");
-          \t\t\tconst st = await res.json();
-          \t\t\tconst root = k === "refs" ? st.refsRoot : st.cinemaRoot;
-          \t\t\tconst target = folderName ? `${root}/${folderName}` : root;
-          \t\t\tconst ok = await window.darkHorseDesktop.openPath(target);
-          \t\t\tif (ok) {
-          \t\t\t\ttoast(`Открыто: ${target}`);
-          \t\t\t\treturn;
-          \t\t\t}
-          \t\t}
-          \t} catch {}
-          \tvoid alertDialog({
-          \t\ttitle: "Локальный путь",
-          \t\tbody: `Не удалось открыть проводник автоматически.\\nПапка: ${folderName || (k === "refs" ? "Референсы" : "Кинозал")}\\n\\nУкажите путь в Настройки → Система.`
-          \t});
-          }'''
-          t = t[:m.start()] + new + t[m.end():]
-          reps = [
-            ('onClick: () => revealLibrary(useDH.getState().hallPath + "/" + album.name),',
-             'onClick: () => { void revealLibrary("cinema", album.name); },'),
-            ('onClick: () => revealLibrary(useDH.getState().hallPath),',
-             'onClick: () => { void revealLibrary("cinema"); },'),
-            ('onClick: () => revealLibrary(`${useDH.getState().refsPath}/${folder.name}`),',
-             'onClick: () => { void revealLibrary("refs", folder.name); },'),
-            ('onClick: () => revealLibrary(useDH.getState().refsPath),',
-             'onClick: () => { void revealLibrary("refs"); },'),
-          ]
-          for a,b in reps:
-              if a not in t: raise SystemExit("missing "+a[:50])
-              t = t.replace(a,b,1)
-          p.write_text(t, encoding="utf-8")
-          print("patched ok", len(t))
-          PY
+          python scripts/patch-engine-desktop.py
+          # CSS polish for keys / selection / tile-x / seg
+          cat >> src/darkhorse/extras.css <<'CSS'
+
+          /* Compact key cards */
+          .key-card {
+            padding: 8px 10px !important;
+            gap: 6px !important;
+            min-height: 0 !important;
+            height: auto !important;
+          }
+          .key-card .input,
+          .key-card input.input {
+            height: 32px !important;
+            min-height: 32px !important;
+            padding: 4px 10px !important;
+          }
+          .key-card .key-balance { font-size: 12px !important; line-height: 1.2 !important; }
+          .keys-list { display: flex !important; flex-direction: column !important; gap: 8px !important; }
+
+          /* Dimmer thinner selection */
+          .key-card.on,
+          .prompt-slot.on {
+            border-width: 1px !important;
+            border-color: color-mix(in srgb, var(--accent) 45%, var(--line)) !important;
+            box-shadow: none !important;
+          }
+
+          /* Fix tile X button alignment */
+          .tile-x {
+            position: absolute !important;
+            top: 6px !important;
+            right: 6px !important;
+            width: 22px !important;
+            height: 22px !important;
+            display: grid !important;
+            place-items: center !important;
+            padding: 0 !important;
+            line-height: 1 !important;
+            border-radius: 6px !important;
+          }
+
+          /* Aspect / resolution like top hotbar */
+          .seg button {
+            background: transparent !important;
+            box-shadow: none !important;
+            border-radius: 0 !important;
+            position: relative !important;
+          }
+          .seg button.active {
+            color: var(--text) !important;
+            background: transparent !important;
+            box-shadow: none !important;
+          }
+          .seg button.active::after {
+            content: "" !important;
+            position: absolute !important;
+            left: 12% !important;
+            right: 12% !important;
+            bottom: 0 !important;
+            height: 2px !important;
+            background: linear-gradient(90deg, transparent, var(--accent), transparent) !important;
+            box-shadow: 0 0 10px var(--glow) !important;
+          }
+          CSS
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -86,34 +93,21 @@ jobs:
           export PATH="$PWD/node_modules/.bin:$PATH"
           node scripts/with-app-env.mjs node node_modules/vite/bin/vite.js build
           node scripts/migrate.mjs || true
-          echo "=== output tree ==="
-          find .vercel/output -maxdepth 4 -type f 2>/dev/null | head -50 || true
           test -f .vercel/output/functions/__server.func/index.mjs && echo "SERVER OK" || echo "SERVER MISSING"
       - name: Stage lean desktop package
         shell: bash
         run: |
           rm -rf stage
           mkdir -p stage/desktop stage/.vercel/output stage/node_modules
-
           cp desktop/main.cjs desktop/preload.cjs stage/desktop/
-
-          # full nitro output (static assets + SSR server)
           cp -r .vercel/output/static stage/.vercel/output/
           cp -r .vercel/output/functions stage/.vercel/output/
           cp .vercel/output/nitro.json stage/.vercel/output/ 2>/dev/null || true
           cp .vercel/output/config.json stage/.vercel/output/ 2>/dev/null || true
-
-          # only srvx runtime for serving nitro
-          if [ -d node_modules/srvx ]; then
-            cp -r node_modules/srvx stage/node_modules/
-          fi
-          # srvx may need few deps — copy common ones if present
+          if [ -d node_modules/srvx ]; then cp -r node_modules/srvx stage/node_modules/; fi
           for d in ufo destr cookie-es defu radix3 h3; do
-            if [ -d "node_modules/$d" ]; then
-              cp -r "node_modules/$d" stage/node_modules/
-            fi
+            if [ -d "node_modules/$d" ]; then cp -r "node_modules/$d" stage/node_modules/; fi
           done
-
           cat > stage/package.json <<'EOF'
           {
             "name": "dark-horse",
@@ -124,9 +118,7 @@ jobs:
             "private": true
           }
           EOF
-
-          echo "=== stage size ==="
-          du -sh stage stage/.vercel stage/node_modules 2>/dev/null || true
+          du -sh stage
           ls stage/.vercel/output/functions/__server.func/index.mjs
       - name: Package Electron Windows
         env:
@@ -139,9 +131,7 @@ jobs:
             --out=release \
             --overwrite \
             --electron-version=33.2.1
-          echo "=== release size ==="
-          du -sh release/DarkHorse-win32-x64 2>/dev/null || true
-          ls release/DarkHorse-win32-x64/resources/app/.vercel/output/functions/__server.func/index.mjs
+          du -sh release/DarkHorse-win32-x64
       - name: Zip with 7z
         shell: bash
         run: |
