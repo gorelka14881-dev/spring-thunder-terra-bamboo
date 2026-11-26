@@ -75,47 +75,45 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm install --no-audit --no-fund
-      - name: Install electron and packager
+      - name: Install electron packager and srvx
         env:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
         run: |
-          npm install electron@33.2.1 @electron/packager@18.3.5 --no-save --no-audit --no-fund || npm install electron@33.2.1 @electron/packager@18.3.5 --no-save --no-audit --no-fund
+          npm install electron@33.2.1 @electron/packager@18.3.5 srvx --no-save --no-audit --no-fund || npm install electron@33.2.1 @electron/packager@18.3.5 srvx --no-save --no-audit --no-fund
       - name: Build app
         shell: bash
         run: |
           export PATH="$PWD/node_modules/.bin:$PATH"
           node scripts/with-app-env.mjs node node_modules/vite/bin/vite.js build
           node scripts/migrate.mjs || true
-          echo "=== static check ==="
-          ls -la .vercel/output/static 2>/dev/null | head -20 || true
-          test -f .vercel/output/static/index.html && echo "index.html OK" || echo "index.html MISSING"
-          find .vercel/output -maxdepth 3 -type f 2>/dev/null | head -40 || true
+          echo "=== output tree ==="
+          find .vercel/output -maxdepth 4 -type f 2>/dev/null | head -50 || true
+          test -f .vercel/output/functions/__server.func/index.mjs && echo "SERVER OK" || echo "SERVER MISSING"
       - name: Stage lean desktop package
         shell: bash
         run: |
           rm -rf stage
-          mkdir -p stage/desktop stage/.vercel/output
+          mkdir -p stage/desktop stage/.vercel/output stage/node_modules
 
-          # desktop bridge
           cp desktop/main.cjs desktop/preload.cjs stage/desktop/
 
-          # built client (required)
-          if [ -d .vercel/output/static ]; then
-            cp -r .vercel/output/static stage/.vercel/output/
-          else
-            echo "ERROR: no static output"
-            exit 1
-          fi
+          # full nitro output (static assets + SSR server)
+          cp -r .vercel/output/static stage/.vercel/output/
+          cp -r .vercel/output/functions stage/.vercel/output/
+          cp .vercel/output/nitro.json stage/.vercel/output/ 2>/dev/null || true
+          cp .vercel/output/config.json stage/.vercel/output/ 2>/dev/null || true
 
-          # optional server functions (API)
-          if [ -d .vercel/output/functions ]; then
-            cp -r .vercel/output/functions stage/.vercel/output/
+          # only srvx runtime for serving nitro
+          if [ -d node_modules/srvx ]; then
+            cp -r node_modules/srvx stage/node_modules/
           fi
-          if [ -f .vercel/output/nitro.json ]; then
-            cp .vercel/output/nitro.json stage/.vercel/output/
-          fi
+          # srvx may need few deps — copy common ones if present
+          for d in ufo destr cookie-es defu radix3 h3; do
+            if [ -d "node_modules/$d" ]; then
+              cp -r "node_modules/$d" stage/node_modules/
+            fi
+          done
 
-          # minimal package.json for electron-packager
           cat > stage/package.json <<'EOF'
           {
             "name": "dark-horse",
@@ -128,9 +126,8 @@ jobs:
           EOF
 
           echo "=== stage size ==="
-          du -sh stage stage/.vercel/output/static 2>/dev/null || true
-          ls -la stage/
-          ls -la stage/.vercel/output/static/ | head -15
+          du -sh stage stage/.vercel stage/node_modules 2>/dev/null || true
+          ls stage/.vercel/output/functions/__server.func/index.mjs
       - name: Package Electron Windows
         env:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
@@ -141,11 +138,10 @@ jobs:
             --arch=x64 \
             --out=release \
             --overwrite \
-            --asar=false \
             --electron-version=33.2.1
           echo "=== release size ==="
           du -sh release/DarkHorse-win32-x64 2>/dev/null || true
-          ls release/DarkHorse-win32-x64/resources/app/.vercel/output/static/index.html
+          ls release/DarkHorse-win32-x64/resources/app/.vercel/output/functions/__server.func/index.mjs
       - name: Zip with 7z
         shell: bash
         run: |
