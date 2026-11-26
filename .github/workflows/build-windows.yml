@@ -1,0 +1,31 @@
+name: Build Windows Desktop
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm install electron@33.2.1 @electron/packager@18.3.5 srvx --no-save
+      - run: npm run build
+      - name: Prepare package.json main
+        shell: bash
+        run: |
+          node -e "const p=require('./package.json'); p.main='desktop/main.cjs'; p.productName='Dark Horse'; require('fs').writeFileSync('package.json', JSON.stringify(p,null,2));"
+      - name: Package Electron Windows
+        run: npx @electron/packager . DarkHorse --platform=win32 --arch=x64 --out=release --overwrite --asar=false --prune=true
+      - name: Zip
+        shell: bash
+        run: |
+          cd release
+          powershell -Command "Compress-Archive -Path 'DarkHorse-win32-x64' -DestinationPath '../DarkHorse-Windows.zip'"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DarkHorse-Windows
+          path: DarkHorse-Windows.zip
+          if-no-files-found: error
