@@ -3,7 +3,7 @@ const path = require("path");
 const http = require("http");
 const fs = require("fs");
 const { pathToFileURL } = require("url");
-const { spawn } = require(" deb_process");
+const { spawn } = require("child_process");
 
 const IS_PACKAGED = app.isPackaged;
 const ROOT = IS_PACKAGED
