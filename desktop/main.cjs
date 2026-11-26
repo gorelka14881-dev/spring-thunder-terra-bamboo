@@ -164,6 +164,11 @@ function createWindow() {
 }
 
 ipcMain.handle("pick-folder", async () => pickFolder());
+ipcMain.handle("open-path", async (_e, target) => {
+  if (!target || typeof target !== "string") return false;
+  const err = await shell.openPath(target);
+  return !err;
+});
 app.commandLine.appendSwitch("disable-renderer-backgrounding");
 app.commandLine.appendSwitch("disable-background-timer-throttling");
 app.commandLine.appendSwitch("enable-gpu-rasterization");
