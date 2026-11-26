@@ -11,7 +11,11 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm install --no-audit --no-fund
-      - run: npm install electron@33.2.1 @electron/packager@18.3.5 srvx --no-save --no-audit --no-fund
+      - name: Install electron and packager
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+        run: |
+          npm install electron@33.2.1 @electron/packager@18.3.5 srvx --no-save --no-audit --no-fund || npm install electron@33.2.1 @electron/packager@18.3.5 srvx --no-save --no-audit --no-fund
       - run: npm run build
       - name: Prepare package.json main
         shell: bash
