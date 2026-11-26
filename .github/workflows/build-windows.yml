@@ -6,6 +6,78 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Restore engine.jsx from history and patch path open
+        shell: bash
+        run: |
+          git show 680ae3e01a7458d2141026bd92d4e58d258b52dd:src/darkhorse/engine.jsx > src/darkhorse/engine.jsx
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("src/darkhorse/engine.jsx")
+          t = p.read_text(encoding="utf-8")
+          old = """function revealLibrary(path) {
+          \tvoid alertDialog({
+          \t\ttitle: \"Локальный путь\",
+          \t\tbody: `В предпросмотре браузера нельзя открыть проводник Windows. Папка запомнена:\\n${path}\\n\\nНа своём компьютере откройте этот путь вручную. Смена диска — в Настройки → Система.`
+          \t});
+          \tvoid copyText(path);
+          }"""
+          # Fix indentation - use exact match from file
+          import re
+          m = re.search(r"function revealLibrary\(path\) \{[\s\S]*?\n\}", t)
+          if not m:
+              raise SystemExit("revealLibrary not found")
+          new = '''async function revealLibrary(kind, folder) {
+          \tconst k = kind === "refs" ? "refs" : "cinema";
+          \tconst folderName = folder || "";
+          \ttry {
+          \t\tconst res = await fetch("/api/library?op=open", {
+          \t\t\tmethod: "POST",
+          \t\t\theaders: { "content-type": "application/json" },
+          \t\t\tbody: JSON.stringify({ kind: k, folder: folderName })
+          \t\t});
+          \t\tconst data = await res.json();
+          \t\tif (data && data.ok) {
+          \t\t\ttoast(data.path ? `Открыто: ${data.path}` : "Папка открыта");
+          \t\t\treturn;
+          \t\t}
+          \t} catch {}
+          \ttry {
+          \t\tif (typeof window !== "undefined" && window.darkHorseDesktop?.openPath) {
+          \t\t\tconst res = await fetch("/api/library?op=status");
+          \t\t\tconst st = await res.json();
+          \t\t\tconst root = k === "refs" ? st.refsRoot : st.cinemaRoot;
+          \t\t\tconst target = folderName ? `${root}/${folderName}` : root;
+          \t\t\tconst ok = await window.darkHorseDesktop.openPath(target);
+          \t\t\tif (ok) {
+          \t\t\t\ttoast(`Открыто: ${target}`);
+          \t\t\t\treturn;
+          \t\t\t}
+          \t\t}
+          \t} catch {}
+          \tvoid alertDialog({
+          \t\ttitle: "Локальный путь",
+          \t\tbody: `Не удалось открыть проводник автоматически.\\nПапка: ${folderName || (k === "refs" ? "Референсы" : "Кинозал")}\\n\\nУкажите путь в Настройки → Система.`
+          \t});
+          }'''
+          t = t[:m.start()] + new + t[m.end():]
+          reps = [
+            ('onClick: () => revealLibrary(useDH.getState().hallPath + "/" + album.name),',
+             'onClick: () => { void revealLibrary("cinema", album.name); },'),
+            ('onClick: () => revealLibrary(useDH.getState().hallPath),',
+             'onClick: () => { void revealLibrary("cinema"); },'),
+            ('onClick: () => revealLibrary(`${useDH.getState().refsPath}/${folder.name}`),',
+             'onClick: () => { void revealLibrary("refs", folder.name); },'),
+            ('onClick: () => revealLibrary(useDH.getState().refsPath),',
+             'onClick: () => { void revealLibrary("refs"); },'),
+          ]
+          for a,b in reps:
+              if a not in t: raise SystemExit("missing "+a[:50])
+              t = t.replace(a,b,1)
+          p.write_text(t, encoding="utf-8")
+          print("patched ok", len(t))
+          PY
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -16,8 +88,6 @@ jobs:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
         run: |
           npm install electron@33.2.1 @electron/packager@18.3.5 srvx --no-save --no-audit --no-fund || npm install electron@33.2.1 @electron/packager@18.3.5 srvx --no-save --no-audit --no-fund
-      - name: Restore engine.jsx
-        run: node scripts/restore-engine.mjs
       - name: Build app
         shell: bash
         run: |
