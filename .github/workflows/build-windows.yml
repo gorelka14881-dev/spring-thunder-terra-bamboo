@@ -84,15 +84,26 @@ jobs:
         shell: bash
         run: |
           export PATH="$PWD/node_modules/.bin:$PATH"
-          # Use node to run vite.js directly — avoids Windows .cmd spawn issues (exit 127)
           node scripts/with-app-env.mjs node node_modules/vite/bin/vite.js build
           node scripts/migrate.mjs || true
-      - name: Prepare package.json main
+      - name: Prepare package.json for Electron
         shell: bash
         run: |
-          node -e "const p=require('./package.json'); p.main='desktop/main.cjs'; p.productName='Dark Horse'; require('fs').writeFileSync('package.json', JSON.stringify(p,null,2));"
+          node -e "
+            const fs = require('fs');
+            const p = require('./package.json');
+            p.main = 'desktop/main.cjs';
+            p.productName = 'Dark Horse';
+            p.version = p.version || '1.0.0';
+            p.author = p.author || 'Dark Horse';
+            p.devDependencies = p.devDependencies || {};
+            p.devDependencies.electron = p.devDependencies.electron || '33.2.1';
+            fs.writeFileSync('package.json', JSON.stringify(p, null, 2));
+          "
       - name: Package Electron Windows
-        run: npx @electron/packager . DarkHorse --platform=win32 --arch=x64 --out=release --overwrite --asar=false --prune=true
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+        run: npx @electron/packager . DarkHorse --platform=win32 --arch=x64 --out=release --overwrite --asar=false --prune=true --electron-version=33.2.1
       - name: Zip
         shell: bash
         run: |
