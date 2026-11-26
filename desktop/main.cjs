@@ -2,45 +2,24 @@ const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
 const path = require("path");
 const http = require("http");
 const fs = require("fs");
+const { pathToFileURL } = require("url");
 const { spawn } = require("child_process");
 
 const IS_PACKAGED = app.isPackaged;
-// When packaged by electron-packager, app lives in resources/app
 const ROOT = IS_PACKAGED
   ? path.join(process.resourcesPath, "app")
   : path.join(__dirname, "..");
 
-const CANDIDATE_STATIC = [
-  path.join(ROOT, ".vercel", "output", "static"),
-  path.join(ROOT, "dist", "client"),
-  path.join(ROOT, "dist"),
-  path.join(ROOT, "public"),
-  path.join(ROOT, "build", "client"),
-  path.join(ROOT, "build"),
-];
-
-function resolveStaticDir() {
-  for (const dir of CANDIDATE_STATIC) {
-    if (fs.existsSync(path.join(dir, "index.html"))) return dir;
-  }
-  // last resort: scan one level
-  try {
-    const vercelStatic = path.join(ROOT, ".vercel", "output", "static");
-    if (fs.existsSync(vercelStatic)) return vercelStatic;
-  } catch {}
-  return CANDIDATE_STATIC[0];
-}
-
-const STATIC_DIR = resolveStaticDir();
-const SERVER_ENTRY = path.join(ROOT, ".vercel", "output", "functions", "__server.func", "index.mjs");
+const STATIC_DIR = path.join(ROOT, ".vercel", "output", "static");
+const SERVER_DIR = path.join(ROOT, ".vercel", "output", "functions", "__server.func");
+const SERVER_ENTRY = path.join(SERVER_DIR, "index.mjs");
 const DATA_DIR = path.join(app.getPath("userData"), "DarkHorseData");
 const PORT = 18765;
 const BRIDGE_PORT = 18766;
 
 let mainWindow = null;
-let serverProc = null;
 let bridgeServer = null;
-let staticServer = null;
+let appServer = null;
 
 function ensureData() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -123,99 +102,166 @@ function contentType(filePath) {
   return types[ext] || "application/octet-stream";
 }
 
-function startStaticServer(root) {
-  staticServer = http.createServer((req, res) => {
-    try {
-      let urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
-      if (!urlPath || urlPath === "/") urlPath = "/index.html";
-
-      let filePath = path.normalize(path.join(root, urlPath));
-      if (!filePath.startsWith(root)) {
-        res.writeHead(403);
-        res.end("Forbidden");
-        return;
-      }
-
-      const sendFile = (fp) => {
-        fs.readFile(fp, (err, data) => {
-          if (err) {
-            // SPA fallback
-            const indexPath = path.join(root, "index.html");
-            fs.readFile(indexPath, (err2, html) => {
-              if (err2) {
-                res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-                res.end(
-                  "Not Found\n\nStatic root: " +
-                    root +
-                    "\nTried: " +
-                    fp +
-                    "\nROOT: " +
-                    ROOT
-                );
-                return;
-              }
-              res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-              res.end(html);
-            });
-            return;
-          }
-          res.writeHead(200, { "content-type": contentType(fp) });
-          res.end(data);
-        });
-      };
-
-      fs.stat(filePath, (err, st) => {
-        if (!err && st.isDirectory()) {
-          filePath = path.join(filePath, "index.html");
-        }
-        sendFile(filePath);
-      });
-    } catch (e) {
-      res.writeHead(500);
-      res.end(String(e));
-    }
-  });
-  staticServer.listen(PORT, "127.0.0.1");
-  serverProc = {
-    kill: () => {
-      try {
-        staticServer.close();
-      } catch {}
-    },
-  };
+function tryServeStatic(req, res) {
+  try {
+    let urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
+    if (!urlPath || urlPath === "/") return false;
+    const filePath = path.normalize(path.join(STATIC_DIR, urlPath));
+    if (!filePath.startsWith(STATIC_DIR)) return false;
+    if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) return false;
+    const data = fs.readFileSync(filePath);
+    res.writeHead(200, { "content-type": contentType(filePath) });
+    res.end(data);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-function startServer() {
-  const env = {
-    ...process.env,
-    PORT: String(PORT),
-    HOST: "127.0.0.1",
-    NITRO_PORT: String(PORT),
-    NITRO_HOST: "127.0.0.1",
-    DH_HOME: path.join(DATA_DIR, "Dark Horse"),
-    DH_BRIDGE_URL: `http://127.0.0.1:${BRIDGE_PORT}`,
-    NODE_ENV: "production",
-  };
+function nodeReqToWebRequest(req, bodyBuf) {
+  const host = req.headers.host || `127.0.0.1:${PORT}`;
+  const url = `http://${host}${req.url || "/"}`;
+  const headers = new Headers();
+  for (const [k, v] of Object.entries(req.headers)) {
+    if (v === undefined) continue;
+    if (Array.isArray(v)) v.forEach((x) => headers.append(k, x));
+    else headers.set(k, v);
+  }
+  const method = req.method || "GET";
+  const init = { method, headers };
+  if (bodyBuf && bodyBuf.length && method !== "GET" && method !== "HEAD") {
+    init.body = bodyBuf;
+  }
+  return new Request(url, init);
+}
 
-  const srvxCandidates = [
-    path.join(ROOT, "node_modules", "srvx", "bin", "srvx.mjs"),
-    path.join(ROOT, "node_modules", "srvx", "dist", "cli.mjs"),
-  ];
-  const cli = srvxCandidates.find((p) => fs.existsSync(p));
+async function webResponseToNode(webRes, res) {
+  res.statusCode = webRes.status;
+  webRes.headers.forEach((value, key) => {
+    if (key.toLowerCase() === "transfer-encoding") return;
+    res.setHeader(key, value);
+  });
+  const buf = Buffer.from(await webRes.arrayBuffer());
+  res.end(buf);
+}
 
-  // Prefer full nitro server if present (API routes)
-  if (fs.existsSync(SERVER_ENTRY) && cli) {
-    serverProc = spawn(process.execPath, [cli, "--static", STATIC_DIR, SERVER_ENTRY], {
-      cwd: path.dirname(SERVER_ENTRY),
-      env: { ...env, ELECTRON_RUN_AS_NODE: "1" },
-      stdio: "ignore",
-    });
-    serverProc.on("error", () => startStaticServer(STATIC_DIR));
-    return;
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    reqn    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
+async function startNitroHttp() {
+  if (!fs.existsSync(SERVER_ENTRY)) {
+    throw new Error("SERVER_ENTRY missing: " + SERVER_ENTRY);
   }
 
-  // Pure static + SPA fallback — enough to show the UI
-  startStaticServer(STATIC_DIR);
+  process.env.PORT = String(PORT);
+  process.env.HOST = "127.0.0.1";
+  process.env.NITRO_PORT = String(PORT);
+  process.env.NITRO_HOST = "127.0.0.1";
+  process.env.DH_HOME = path.join(DATA_DIR, "Dark Horse");
+  process.env.DH_BRIDGE_URL = `http://127.0.0.1:${BRIDGE_PORT}`;
+  process.env.NODE_ENV = "production";
+
+  // Load nitro/vercel function module
+  const mod = await import(pathToFileURL(SERVER_ENTRY).href);
+  const handler =
+    typeof mod.default === "function"
+      ? mod.default
+      : typeof mod.default?.fetch === "function"
+        ? mod.default.fetch.bind(mod.default)
+        : typeof mod.fetch === "function"
+          ? mod.fetch
+          : typeof mod.handler === "function"
+            ? mod.handler
+            : null;
+
+  if (!handler) {
+    throw new Error(
+      "No fetch handler in server entry. Keys: " + Object.keys(mod).join(",")
+    );
+  }
+
+  appServer = http.createServer(async (req, res) => {
+    try {
+      // Fast path for static assets
+      if (tryServeStatic(req, res)) return;
+
+      const body = await readBody(req);
+      const webReq = nodeReqToWebRequest(req, body);
+      const webRes = await handler(webReq);
+      await webResponseToNode(webRes, res);
+    } catch (e) {
+      res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+      res.end("Server error: " + String(e && e.stack ? e.stack : e));
+    }
+  });
+
+  await new Promise((resolve, reject) => {
+    appServer.once("error", reject);
+    appServer.listen(PORT, "127.0.0.1", resolve);
+  });
+}
+
+function startStaticOnly() {
+  appServer = http.createServer((req, res) => {
+    if (tryServeStatic(req, res)) return;
+    res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+    res.end(
+      "Not Found\n\nStatic root: " +
+        STATIC_DIR +
+        "\nTried: " +
+        path.join(STATIC_DIR, "index.html") +
+        "\nROOT: " +
+        ROOT +
+        "\nSERVER: " +
+        SERVER_ENTRY +
+        " exists=" +
+        fs.existsSync(SERVER_ENTRY)
+    );
+  });
+  appServer.listen(PORT, "127.0.0.1");
+}
+
+async function startServer() {
+  try {
+    await startNitroHttp();
+  } catch (e) {
+    // Last resort: try srvx CLI if present
+    const srvxCandidates = [
+      path.join(ROOT, "node_modules", "srvx", "dist", "cli.mjs"),
+      path.join(ROOT, "node_modules", "srvx", "bin", "srvx.mjs"),
+    ];
+    const cli = srvxCandidates.find((p) => fs.existsSync(p));
+    if (cli && fs.existsSync(SERVER_ENTRY)) {
+      const child = spawn(
+        process.execPath,
+        [cli, "--static", STATIC_DIR, SERVER_ENTRY],
+        {
+          cwd: SERVER_DIR,
+          env: {
+            ...process.env,
+            PORT: String(PORT),
+            HOST: "127.0.0.1",
+            ELECTRON_RUN_AS_NODE: "1",
+            DH_HOME: path.join(DATA_DIR, "Dark Horse"),
+            DH_BRIDGE_URL: `http://127.0.0.1:${BRIDGE_PORT}`,
+            NODE_ENV: "production",
+          },
+          stdio: "ignore",
+        }
+      );
+      appServer = { close: () => { try { child.kill(); } catch {} } };
+      return;
+    }
+    startStaticOnly();
+    // surface error in window title later
+    console.error("startServer failed", e);
+  }
 }
 
 function createWindow() {
@@ -244,10 +290,10 @@ function createWindow() {
   const url = `http://127.0.0.1:${PORT}/`;
   const tryLoad = (attempt = 0) => {
     mainWindow.loadURL(url).catch(() => {
-      if (attempt < 60) setTimeout(() => tryLoad(attempt + 1), 250);
+      if (attempt < 80) setTimeout(() => tryLoad(attempt + 1), 250);
     });
   };
-  setTimeout(() => tryLoad(), 300);
+  setTimeout(() => tryLoad(), 400);
 }
 
 ipcMain.handle("pick-folder", async () => pickFolder());
@@ -261,16 +307,15 @@ app.commandLine.appendSwitch("disable-renderer-backgrounding");
 app.commandLine.appendSwitch("disable-background-timer-throttling");
 app.commandLine.appendSwitch("enable-gpu-rasterization");
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   ensureData();
   startBridge();
-  startServer();
+  await startServer();
   createWindow();
 });
 
 app.on("window-all-closed", () => {
-  if (serverProc && serverProc.kill) try { serverProc.kill(); } catch {}
+  if (appServer && appServer.close) try { appServer.close(); } catch {}
   if (bridgeServer) try { bridgeServer.close(); } catch {}
-  if (staticServer) try { staticServer.close(); } catch {}
   app.quit();
 });
