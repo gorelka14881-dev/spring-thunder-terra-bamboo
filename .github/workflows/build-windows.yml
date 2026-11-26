@@ -103,12 +103,25 @@ jobs:
       - name: Package Electron Windows
         env:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
-        run: npx @electron/packager . DarkHorse --platform=win32 --arch=x64 --out=release --overwrite --asar=false --prune=true --electron-version=33.2.1
-      - name: Zip
+        shell: bash
+        run: |
+          npx @electron/packager . DarkHorse \
+            --platform=win32 \
+            --arch=x64 \
+            --out=release \
+            --overwrite \
+            --asar=false \
+            --prune=true \
+            --electron-version=33.2.1 \
+            --ignore="^/(src|scripts|docs|tests?|\.git|\.github|\.vscode|playwright|coverage|tmp|temp)(/|$)" \
+            --ignore="^/\.(env|eslintrc|prettierrc|gitignore)" \
+            --ignore="tsconfig|eslint|prettier|vitest|playwright"
+      - name: Zip with 7z
         shell: bash
         run: |
           cd release
-          powershell -Command "Compress-Archive -Path 'DarkHorse-win32-x64' -DestinationPath '../DarkHorse-Windows.zip'"
+          7z a -tzip -mx=5 ../DarkHorse-Windows.zip DarkHorse-win32-x64
+          ls -lh ../DarkHorse-Windows.zip
       - uses: actions/upload-artifact@v4
         with:
           name: DarkHorse-Windows
