@@ -23,8 +23,8 @@ let appServer = null;
 
 function ensureData() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.mkdirSync(path.join(DATA_DIR, "Dark Horse", "Кинозал"), { recursive: true });
-  fs.mkdirSync(path.join(DATA_DIR, "Dark Horse", "Референсы"), { recursive: true });
+  fs.mkdirSync(path.join(DATA_DIR, "Dark Horse", "Cinema"), { recursive: true });
+  fs.mkdirSync(path.join(DATA_DIR, "Dark Horse", "References"), { recursive: true });
 }
 
 async function pickFolder() {
@@ -297,6 +297,24 @@ ipcMain.handle("open-path", async (_e, target) => {
   if (!target || typeof target !== "string") return false;
   const err = await shell.openPath(target);
   return !err;
+});
+
+ipcMain.handle("save-state", async (_e, json) => {
+  try {
+    const file = path.join(DATA_DIR, "state.json");
+    fs.writeFileSync(file, String(json || "{}"), "utf8");
+    return true;
+  } catch {
+    return false;
+  }
+});
+ipcMain.handle("load-state", async () => {
+  try {
+    const file = path.join(DATA_DIR, "state.json");
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
 });
 
 app.commandLine.appendSwitch("disable-renderer-backgrounding");
