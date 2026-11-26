@@ -16,6 +16,8 @@ jobs:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
         run: |
           npm install electron@33.2.1 @electron/packager@18.3.5 srvx --no-save --no-audit --no-fund || npm install electron@33.2.1 @electron/packager@18.3.5 srvx --no-save --no-audit --no-fund
+      - name: Restore engine.jsx
+        run: node scripts/restore-engine.mjs
       - name: Build app
         shell: bash
         run: |
