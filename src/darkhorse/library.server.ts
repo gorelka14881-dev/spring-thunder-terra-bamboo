@@ -1,25 +1,35 @@
 import { execFile, spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import os from "node:os";
 
 type Meta = {
   cinemaChosen: string | null;
   refsChosen: string | null;
 };
 
-const META_FILE = path.join(process.cwd(), "data", "library.json");
+function dataRoot() {
+  // Electron sets DH_HOME = <userData>/DarkHorseData/Dark Horse
+  if (process.env.DH_HOME) return path.dirname(process.env.DH_HOME);
+  // Fallback writable location
+  return path.join(os.homedir(), "DarkHorseData");
+}
 
 function homeDir() {
-  return process.env.DH_HOME || path.join(process.cwd(), "data", "Dark Horse");
+  return process.env.DH_HOME || path.join(dataRoot(), "Dark Horse");
+}
+
+function metaFile() {
+  return path.join(dataRoot(), "library.json");
 }
 
 function defaultChosen() {
-  return path.dirname(homeDir());
+  return dataRoot();
 }
 
 async function readMeta(): Promise<Meta> {
   try {
-    const raw = JSON.parse(await fs.readFile(META_FILE, "utf8")) as Partial<Meta>;
+    const raw = JSON.parse(await fs.readFile(metaFile(), "utf8")) as Partial<Meta>;
     return {
       cinemaChosen: typeof raw.cinemaChosen === "string" ? raw.cinemaChosen : null,
       refsChosen: typeof raw.refsChosen === "string" ? raw.refsChosen : null,
@@ -30,17 +40,23 @@ async function readMeta(): Promise<Meta> {
 }
 
 async function writeMeta(meta: Meta) {
-  await fs.mkdir(path.dirname(META_FILE), { recursive: true });
-  await fs.writeFile(META_FILE, JSON.stringify(meta, null, 2));
+  await fs.mkdir(path.dirname(metaFile()), { recursive: true });
+  await fs.writeFile(metaFile(), JSON.stringify(meta, null, 2));
 }
 
 function kindFolder(kind: string) {
-  return kind === "refs" ? "Референсы" : "Кинозал";
+  // English folder names to avoid path issues; UI can still say Russian
+  return kind === "refs" ? "References" : "Cinema";
 }
 
 function rootFor(meta: Meta, kind: string) {
   const chosen = kind === "refs" ? meta.refsChosen : meta.cinemaChosen;
   const base = chosen && path.isAbsolute(chosen) ? chosen : defaultChosen();
+  // If user pointed directly at Cinema/References, use as-is
+  const baseName = path.basename(base).toLowerCase();
+  if (baseName === "cinema" || baseName === "кинозал" || baseName === "references" || baseName === "референсы") {
+    return base;
+  }
   return path.join(base, "Dark Horse", kindFolder(kind));
 }
 
@@ -51,7 +67,7 @@ function safeSegment(name: string) {
 }
 
 function inside(root: string, target: string) {
-  const rel = path.relative(root, target);
+  const rel = path.relative(path.resolve(root), path.resolve(target));
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
@@ -124,9 +140,13 @@ function runFile(cmd: string, args: string[], timeout = 180000) {
 async function pickLocalFolder() {
   const bridge = process.env.DH_BRIDGE_URL;
   if (bridge) {
-    const res = await fetch(`${bridge}/pick`, { method: "POST" });
-    const data = (await res.json()) as { path?: string | null };
-    return data.path || null;
+    try {
+      const res = await fetch(`${bridge}/pick`, { method: "POST" });
+      const data = (await res.json()) as { path?: string | null };
+      return data.path || null;
+    } catch {
+      return null;
+    }
   }
   if (process.platform === "win32") {
     const script = [
@@ -161,11 +181,13 @@ async function pickLocalFolder() {
 async function openInShell(target: string) {
   const bridge = process.env.DH_BRIDGE_URL;
   if (bridge) {
-    await fetch(`${bridge}/open`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ path: target }),
-    });
+    try {
+      await fetch(`${bridge}/open`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path: target }),
+      });
+    } catch {}
     return;
   }
   const platform = process.platform;
