@@ -10,8 +10,8 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-      - run: npm ci
-      - run: npm install electron@33.2.1 @electron/packager@18.3.5 srvx --no-save
+      - run: npm install --no-audit --no-fund
+      - run: npm install electron@33.2.1 @electron/packager@18.3.5 srvx --no-save --no-audit --no-fund
       - run: npm run build
       - name: Prepare package.json main
         shell: bash
