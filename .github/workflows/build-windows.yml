@@ -79,43 +79,73 @@ jobs:
         env:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
         run: |
-          npm install electron@33.2.1 @electron/packager@18.3.5 srvx --no-save --no-audit --no-fund || npm install electron@33.2.1 @electron/packager@18.3.5 srvx --no-save --no-audit --no-fund
+          npm install electron@33.2.1 @electron/packager@18.3.5 --no-save --no-audit --no-fund || npm install electron@33.2.1 @electron/packager@18.3.5 --no-save --no-audit --no-fund
       - name: Build app
         shell: bash
         run: |
           export PATH="$PWD/node_modules/.bin:$PATH"
           node scripts/with-app-env.mjs node node_modules/vite/bin/vite.js build
           node scripts/migrate.mjs || true
-      - name: Prepare package.json for Electron
+          echo "=== static check ==="
+          ls -la .vercel/output/static 2>/dev/null | head -20 || true
+          test -f .vercel/output/static/index.html && echo "index.html OK" || echo "index.html MISSING"
+          find .vercel/output -maxdepth 3 -type f 2>/dev/null | head -40 || true
+      - name: Stage lean desktop package
         shell: bash
         run: |
-          node -e "
-            const fs = require('fs');
-            const p = require('./package.json');
-            p.main = 'desktop/main.cjs';
-            p.productName = 'Dark Horse';
-            p.version = p.version || '1.0.0';
-            p.author = p.author || 'Dark Horse';
-            p.devDependencies = p.devDependencies || {};
-            p.devDependencies.electron = p.devDependencies.electron || '33.2.1';
-            fs.writeFileSync('package.json', JSON.stringify(p, null, 2));
-          "
+          rm -rf stage
+          mkdir -p stage/desktop stage/.vercel/output
+
+          # desktop bridge
+          cp desktop/main.cjs desktop/preload.cjs stage/desktop/
+
+          # built client (required)
+          if [ -d .vercel/output/static ]; then
+            cp -r .vercel/output/static stage/.vercel/output/
+          else
+            echo "ERROR: no static output"
+            exit 1
+          fi
+
+          # optional server functions (API)
+          if [ -d .vercel/output/functions ]; then
+            cp -r .vercel/output/functions stage/.vercel/output/
+          fi
+          if [ -f .vercel/output/nitro.json ]; then
+            cp .vercel/output/nitro.json stage/.vercel/output/
+          fi
+
+          # minimal package.json for electron-packager
+          cat > stage/package.json <<'EOF'
+          {
+            "name": "dark-horse",
+            "productName": "Dark Horse",
+            "version": "1.0.0",
+            "author": "Dark Horse",
+            "main": "desktop/main.cjs",
+            "private": true
+          }
+          EOF
+
+          echo "=== stage size ==="
+          du -sh stage stage/.vercel/output/static 2>/dev/null || true
+          ls -la stage/
+          ls -la stage/.vercel/output/static/ | head -15
       - name: Package Electron Windows
         env:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
         shell: bash
         run: |
-          npx @electron/packager . DarkHorse \
+          npx @electron/packager ./stage DarkHorse \
             --platform=win32 \
             --arch=x64 \
             --out=release \
             --overwrite \
             --asar=false \
-            --prune=true \
-            --electron-version=33.2.1 \
-            --ignore="^/(src|scripts|docs|tests?|\.git|\.github|\.vscode|playwright|coverage|tmp|temp)(/|$)" \
-            --ignore="^/\.(env|eslintrc|prettierrc|gitignore)" \
-            --ignore="tsconfig|eslint|prettier|vitest|playwright"
+            --electron-version=33.2.1
+          echo "=== release size ==="
+          du -sh release/DarkHorse-win32-x64 2>/dev/null || true
+          ls release/DarkHorse-win32-x64/resources/app/.vercel/output/static/index.html
       - name: Zip with 7z
         shell: bash
         run: |
