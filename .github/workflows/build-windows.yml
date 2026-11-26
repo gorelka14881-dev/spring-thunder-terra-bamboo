@@ -14,17 +14,9 @@ jobs:
           git show 680ae3e01a7458d2141026bd92d4e58d258b52dd:src/darkhorse/engine.jsx > src/darkhorse/engine.jsx
           python - <<'PY'
           from pathlib import Path
+          import re
           p = Path("src/darkhorse/engine.jsx")
           t = p.read_text(encoding="utf-8")
-          old = """function revealLibrary(path) {
-          \tvoid alertDialog({
-          \t\ttitle: \"Локальный путь\",
-          \t\tbody: `В предпросмотре браузера нельзя открыть проводник Windows. Папка запомнена:\\n${path}\\n\\nНа своём компьютере откройте этот путь вручную. Смена диска — в Настройки → Система.`
-          \t});
-          \tvoid copyText(path);
-          }"""
-          # Fix indentation - use exact match from file
-          import re
           m = re.search(r"function revealLibrary\(path\) \{[\s\S]*?\n\}", t)
           if not m:
               raise SystemExit("revealLibrary not found")
@@ -92,7 +84,8 @@ jobs:
         shell: bash
         run: |
           export PATH="$PWD/node_modules/.bin:$PATH"
-          node scripts/with-app-env.mjs vite build
+          # Use node to run vite.js directly — avoids Windows .cmd spawn issues (exit 127)
+          node scripts/with-app-env.mjs node node_modules/vite/bin/vite.js build
           node scripts/migrate.mjs || true
       - name: Prepare package.json main
         shell: bash
