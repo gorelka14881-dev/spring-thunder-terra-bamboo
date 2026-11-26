@@ -5,10 +5,34 @@ const fs = require("fs");
 const { spawn } = require("child_process");
 
 const IS_PACKAGED = app.isPackaged;
-const ROOT = IS_PACKAGED ? path.join(process.resourcesPath, "app") : path.join(__dirname, "..");
-const OUTPUT = path.join(ROOT, ".vercel", "output");
-const STATIC_DIR = path.join(OUTPUT, "static");
-const SERVER_ENTRY = path.join(OUTPUT, "functions", "__server.func", "index.mjs");
+// When packaged by electron-packager, app lives in resources/app
+const ROOT = IS_PACKAGED
+  ? path.join(process.resourcesPath, "app")
+  : path.join(__dirname, "..");
+
+const CANDIDATE_STATIC = [
+  path.join(ROOT, ".vercel", "output", "static"),
+  path.join(ROOT, "dist", "client"),
+  path.join(ROOT, "dist"),
+  path.join(ROOT, "public"),
+  path.join(ROOT, "build", "client"),
+  path.join(ROOT, "build"),
+];
+
+function resolveStaticDir() {
+  for (const dir of CANDIDATE_STATIC) {
+    if (fs.existsSync(path.join(dir, "index.html"))) return dir;
+  }
+  // last resort: scan one level
+  try {
+    const vercelStatic = path.join(ROOT, ".vercel", "output", "static");
+    if (fs.existsSync(vercelStatic)) return vercelStatic;
+  } catch {}
+  return CANDIDATE_STATIC[0];
+}
+
+const STATIC_DIR = resolveStaticDir();
+const SERVER_ENTRY = path.join(ROOT, ".vercel", "output", "functions", "__server.func", "index.mjs");
 const DATA_DIR = path.join(app.getPath("userData"), "DarkHorseData");
 const PORT = 18765;
 const BRIDGE_PORT = 18766;
@@ -16,6 +40,7 @@ const BRIDGE_PORT = 18766;
 let mainWindow = null;
 let serverProc = null;
 let bridgeServer = null;
+let staticServer = null;
 
 function ensureData() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -75,6 +100,91 @@ function startBridge() {
   bridgeServer.listen(BRIDGE_PORT, "127.0.0.1");
 }
 
+function contentType(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  const types = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".mjs": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".map": "application/json",
+  };
+  return types[ext] || "application/octet-stream";
+}
+
+function startStaticServer(root) {
+  staticServer = http.createServer((req, res) => {
+    try {
+      let urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
+      if (!urlPath || urlPath === "/") urlPath = "/index.html";
+
+      let filePath = path.normalize(path.join(root, urlPath));
+      if (!filePath.startsWith(root)) {
+        res.writeHead(403);
+        res.end("Forbidden");
+        return;
+      }
+
+      const sendFile = (fp) => {
+        fs.readFile(fp, (err, data) => {
+          if (err) {
+            // SPA fallback
+            const indexPath = path.join(root, "index.html");
+            fs.readFile(indexPath, (err2, html) => {
+              if (err2) {
+                res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+                res.end(
+                  "Not Found\n\nStatic root: " +
+                    root +
+                    "\nTried: " +
+                    fp +
+                    "\nROOT: " +
+                    ROOT
+                );
+                return;
+              }
+              res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+              res.end(html);
+            });
+            return;
+          }
+          res.writeHead(200, { "content-type": contentType(fp) });
+          res.end(data);
+        });
+      };
+
+      fs.stat(filePath, (err, st) => {
+        if (!err && st.isDirectory()) {
+          filePath = path.join(filePath, "index.html");
+        }
+        sendFile(filePath);
+      });
+    } catch (e) {
+      res.writeHead(500);
+      res.end(String(e));
+    }
+  });
+  staticServer.listen(PORT, "127.0.0.1");
+  serverProc = {
+    kill: () => {
+      try {
+        staticServer.close();
+      } catch {}
+    },
+  };
+}
+
 function startServer() {
   const env = {
     ...process.env,
@@ -87,50 +197,25 @@ function startServer() {
     NODE_ENV: "production",
   };
 
-  const srvxCli = path.join(ROOT, "node_modules", "srvx", "bin", "srvx.mjs");
-  const srvxCli2 = path.join(ROOT, "node_modules", "srvx", "dist", "cli.mjs");
-  const cli = fs.existsSync(srvxCli) ? srvxCli : srvxCli2;
+  const srvxCandidates = [
+    path.join(ROOT, "node_modules", "srvx", "bin", "srvx.mjs"),
+    path.join(ROOT, "node_modules", "srvx", "dist", "cli.mjs"),
+  ];
+  const cli = srvxCandidates.find((p) => fs.existsSync(p));
 
-  if (fs.existsSync(SERVER_ENTRY) && fs.existsSync(cli)) {
+  // Prefer full nitro server if present (API routes)
+  if (fs.existsSync(SERVER_ENTRY) && cli) {
     serverProc = spawn(process.execPath, [cli, "--static", STATIC_DIR, SERVER_ENTRY], {
       cwd: path.dirname(SERVER_ENTRY),
       env: { ...env, ELECTRON_RUN_AS_NODE: "1" },
       stdio: "ignore",
     });
+    serverProc.on("error", () => startStaticServer(STATIC_DIR));
     return;
   }
 
-  const root = fs.existsSync(STATIC_DIR) ? STATIC_DIR : path.join(ROOT, "public");
-  const staticServer = http.createServer((req, res) => {
-    let urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
-    if (urlPath === "/") urlPath = "/index.html";
-    const filePath = path.normalize(path.join(root, urlPath));
-    if (!filePath.startsWith(root)) {
-      res.writeHead(403);
-      res.end();
-      return;
-    }
-    fs.readFile(filePath, (err, data) => {
-      if (err) {
-        res.writeHead(404);
-        res.end("Not found");
-        return;
-      }
-      const ext = path.extname(filePath);
-      const types = {
-        ".html": "text/html; charset=utf-8",
-        ".js": "application/javascript",
-        ".css": "text/css",
-        ".json": "application/json",
-        ".png": "image/png",
-        ".svg": "image/svg+xml",
-      };
-      res.writeHead(200, { "content-type": types[ext] || "application/octet-stream" });
-      res.end(data);
-    });
-  });
-  staticServer.listen(PORT, "127.0.0.1");
-  serverProc = { kill: () => staticServer.close() };
+  // Pure static + SPA fallback — enough to show the UI
+  startStaticServer(STATIC_DIR);
 }
 
 function createWindow() {
@@ -150,17 +235,19 @@ function createWindow() {
       backgroundThrottling: false,
     },
   });
+
   mainWindow.once("ready-to-show", () => {
     mainWindow.show();
     mainWindow.focus();
   });
+
   const url = `http://127.0.0.1:${PORT}/`;
   const tryLoad = (attempt = 0) => {
     mainWindow.loadURL(url).catch(() => {
-      if (attempt < 50) setTimeout(() => tryLoad(attempt + 1), 200);
+      if (attempt < 60) setTimeout(() => tryLoad(attempt + 1), 250);
     });
   };
-  setTimeout(() => tryLoad(), 400);
+  setTimeout(() => tryLoad(), 300);
 }
 
 ipcMain.handle("pick-folder", async () => pickFolder());
@@ -169,6 +256,7 @@ ipcMain.handle("open-path", async (_e, target) => {
   const err = await shell.openPath(target);
   return !err;
 });
+
 app.commandLine.appendSwitch("disable-renderer-backgrounding");
 app.commandLine.appendSwitch("disable-background-timer-throttling");
 app.commandLine.appendSwitch("enable-gpu-rasterization");
@@ -183,5 +271,6 @@ app.whenReady().then(() => {
 app.on("window-all-closed", () => {
   if (serverProc && serverProc.kill) try { serverProc.kill(); } catch {}
   if (bridgeServer) try { bridgeServer.close(); } catch {}
+  if (staticServer) try { staticServer.close(); } catch {}
   app.quit();
 });
