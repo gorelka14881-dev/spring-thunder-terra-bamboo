@@ -3,7 +3,7 @@ const path = require("path");
 const http = require("http");
 const fs = require("fs");
 const { pathToFileURL } = require("url");
-const { spawn } = require("child_process");
+const { spawn } = require(" deb_process");
 
 const IS_PACKAGED = app.isPackaged;
 const ROOT = IS_PACKAGED
@@ -148,7 +148,7 @@ async function webResponseToNode(webRes, res) {
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    reqn    req.on("data", (c) => chunks.push(c));
+    req.on("data", (c) => chunks.push(c));
     req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
@@ -167,7 +167,6 @@ async function startNitroHttp() {
   process.env.DH_BRIDGE_URL = `http://127.0.0.1:${BRIDGE_PORT}`;
   process.env.NODE_ENV = "production";
 
-  // Load nitro/vercel function module
   const mod = await import(pathToFileURL(SERVER_ENTRY).href);
   const handler =
     typeof mod.default === "function"
@@ -188,7 +187,6 @@ async function startNitroHttp() {
 
   appServer = http.createServer(async (req, res) => {
     try {
-      // Fast path for static assets
       if (tryServeStatic(req, res)) return;
 
       const body = await readBody(req);
@@ -231,7 +229,6 @@ async function startServer() {
   try {
     await startNitroHttp();
   } catch (e) {
-    // Last resort: try srvx CLI if present
     const srvxCandidates = [
       path.join(ROOT, "node_modules", "srvx", "dist", "cli.mjs"),
       path.join(ROOT, "node_modules", "srvx", "bin", "srvx.mjs"),
@@ -259,7 +256,6 @@ async function startServer() {
       return;
     }
     startStaticOnly();
-    // surface error in window title later
     console.error("startServer failed", e);
   }
 }
